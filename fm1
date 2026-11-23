@@ -1,0 +1,34 @@
+#!/bin/sh
+# Everything runs in Docker, nothing else to install.
+#   ./fm1 build    the four firmware packages in build/: the FM-1 and the SMK-37 Pro / Elite / MKE-P37
+#   ./fm1 fmt      format the code (clang-format, ruff)
+#   ./fm1 shell    a shell in the toolchain container
+#   ./fm1 image    build the toolchain image here (instead of pulling it)
+#   ./fm1 clean    remove build/
+# Install a package with mutant.cloud (or the stock updater).
+set -e
+cd "$(dirname "$0")"
+IMAGE="${FOMA_IMAGE:-konsumer/foma-toolchain}"
+
+image() {
+  [ -f Dockerfile ] || { echo "fm1: no Dockerfile here; the image comes from Docker Hub ($IMAGE)"; exit 1; }
+  docker build --platform linux/amd64 -t "$IMAGE" .
+}
+
+run() {
+  docker info >/dev/null 2>&1 || { echo "fm1: Docker is not running"; exit 1; }
+  docker image inspect "$IMAGE" >/dev/null 2>&1 || docker pull --platform linux/amd64 "$IMAGE" || image
+  TTY=""
+  [ -t 0 ] && [ -t 1 ] && TTY="-it"
+  # shellcheck disable=SC2086
+  docker run --rm --init $TTY --platform linux/amd64 -u "$(id -u):$(id -g)" -v "$PWD:/work" "$IMAGE" "$@"
+}
+
+case "${1:-build}" in
+  build) run python3 tools/build.py ;;
+  fmt) run sh -c 'clang-format -i src/*.c platform/*.c platform/*.h && ruff format tools' ;;
+  shell) run bash ;;
+  image) image ;;
+  clean) rm -rf build ;;
+  *) sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
+esac

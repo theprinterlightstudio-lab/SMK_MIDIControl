@@ -1,0 +1,12 @@
+{
+  "name": "DUMBMIDI",
+  "version": "1.0.2",
+  "identity": "FM-1_95",
+  "product": "FM-1_957",
+  "options": {
+    "usb_audio": false,
+    "trs_midi": false,
+    "midi_clock": false,
+    "bluetooth": true
+  }
+}
