@@ -1,0 +1,190 @@
+diff --git a/src/chord.h b/src/chord.h
+index 0000000..0000000 100644
+--- a/src/chord.h
++++ b/src/chord.h
+@@ -43,7 +43,7 @@ static inline int chord_name(uint16_t pcs, int bass, char* out, int cap) {
+-/* match: "?" (the notes are still shown separately). */
++/* match: "NOTES" (the individual notes are still shown separately). */
+@@ -84,8 +84,12 @@ static inline int chord_name(uint16_t pcs, int bass, char* out, int cap) {
+   }
+   if (!hit) {
+-    out[0] = '?';
+-    out[1] = 0;
+-    return 1;
++    static const char fallback[] = "NOTES";
++    while (fallback[len] && len < cap - 1) {
++      out[len] = fallback[len];
++      len++;
++    }
++    out[len] = 0;
++    return len;
+   }
+*** a/src/main.c
+--- b/src/main.c
+@@
+ #define C_ACC RGB(64, 224, 196)
+ #define C_SEL RGB(14, 46, 48)
++#define C_KNOB_A RGB(64, 224, 196)
++#define C_KNOB_B RGB(176, 106, 255)
++#define C_FADER_A RGB(255, 182, 72)
++#define C_FADER_B RGB(72, 164, 255)
+@@
+-#define OVL_DIALS 2 /* strictly 1 or 2 dials on screen */
+ #define OVL_TOP 26
+@@
+ static uint8_t learn_kind, learn_slot;
+ static int learn_cc;
+ static uint8_t learn_back=0xFFu; /* the page to go back to, 0xFF: stay */
++static uint8_t para_swallow_release;
++static uint32_t splash_until;
+@@
+ static int accel(int32_t detents, uint32_t *last) {
+   if (!detents) {
+     return 0;
+   }
+   uint32_t now=millis(), dt=now-*last;
+   *last=now;
+-  return (int)(detents* (dt<25 ? 4 : dt<60 ? 2 : 1));
++  /* Slow turns remain one MIDI step per detent. Fast cranks scale smoothly
++   * enough to cross a parameter range without making normal edits jump. */
++  int mult=dt<12 ? 8 : dt<25 ? 5 : dt<50 ? 3 : dt<90 ? 2 : 1;
++  return (int)(detents*mult);
+ }
+@@
+ static void draw_main_status(void) {
+@@
+-  int x=150;
++  int x=112;
+   aa_text(x, 1, "A", cfg.arp_on ? C_ACC : C_LINE, AA_SMALL);
+   aa_text(x+14, 1, "C", cfg.chord_on ? C_ACC : C_LINE, AA_SMALL);
+   aa_text(x+28, 1, "S", cfg.scale_on ? C_ACC : C_LINE, AA_SMALL);
+   aa_text(x+42, 1, "P", cfg.split_on ? C_ACC : C_LINE, AA_SMALL);
++#if BOARD_SMK37
++  aa_text(x+58, 1, cfg.knob_bank ? "KB" : "KA", cfg.knob_bank ? C_KNOB_B : C_KNOB_A, AA_SMALL);
++  aa_text(x+80, 1, cfg.fader_bank ? "FB" : "FA", cfg.fader_bank ? C_FADER_B : C_FADER_A, AA_SMALL);
++#endif
+@@
+-/* return at most the 2 most recently active controls, oldest of the pair first */
++/* Return the four newest controls, oldest first so their positions do not jump. */
+ static int ovl_live(int idx[OVL_MAX]) {
+@@
+-  if (count <= 2) {
+-    for (int i=0; i<count; i++) idx[i]=live[i];
+-    return count;
+-  }
+-
+-  int newest=live[0], second=live[1];
+-  if (ovl[second].at>ovl[newest].at) {
+-    int tmp=newest; newest=second; second=tmp;
+-  }
+-  for (int i=2; i<count; i++) {
+-    int cand=live[i];
+-    if (ovl[cand].at>ovl[newest].at) {
+-      second=newest;
+-      newest=cand;
+-    } else if (ovl[cand].at>ovl[second].at) {
+-      second=cand;
+-    }
+-  }
+-  idx[0]=second;
+-  idx[1]=newest;
+-  return 2;
++  for (int a=0; a<count; a++) {
++    for (int b=a+1; b<count; b++) {
++      if (ovl[live[a]].at>ovl[live[b]].at) {
++        int tmp=live[a]; live[a]=live[b]; live[b]=tmp;
++      }
++    }
++  }
++  int first=count>4 ? count-4 : 0;
++  for (int i=first; i<count; i++) idx[i-first]=live[i];
++  return count-first;
+ }
+@@
+ static void ovl_place(int n, int i, int *cx, int *cy, int *r) {
+   if (n <= 1) {
+     *cx=SCREEN_W/2, *cy=124, *r=84;
+-  } else {
++  } else if (n == 2) {
+     *cx=i ? 178 : 62, *cy=124, *r=54;
++  } else {
++    *cx=(i&1) ? 180 : 60;
++    *cy=i>1 ? 157 : 74;
++    *r=35;
+   }
+ }
++
++static uint16_t ovl_color(const ovl_t *o) {
++  int bank=o->kind==CTL_KNOB ? o->slot/N_KNOB_PHYS : o->slot/N_FADER_PHYS;
++  if (o->learn) return C_TXT;
++  if (o->kind==CTL_KNOB) return bank ? C_KNOB_B : C_KNOB_A;
++  return bank ? C_FADER_B : C_FADER_A;
++}
+@@
+-    dial_arc(cx, cy, r, thick, DIAL_A0, a-DIAL_A0, o->learn ? C_TXT : C_ACC);
++    dial_arc(cx, cy, r, thick, DIAL_A0, a-DIAL_A0, ovl_color(o));
+@@
+-  aa_text_c(cx-r, gap, 2*r, b, C_MUT, AA_SMALL);
++  aa_text_c(cx-r, gap, 2*r, b, ovl_color(o), n <= 2 ? AA_MID : AA_SMALL);
+@@
+-    aa_text_c(cx-r, gap+15, 2*r, b, C_MUT, AA_SMALL);
++    aa_text_c(cx-r, gap+15, 2*r, b, ovl_color(o), n <= 2 ? AA_MID : AA_SMALL);
+@@
+-    rect(x, top+h-fill, w, fill, o->learn ? C_TXT : C_ACC);
++    rect(x, top+h-fill, w, fill, ovl_color(o));
+@@
+-  aa_text_c(cx-r, top+h+4, 2*r, b, C_MUT, AA_SMALL);
++  aa_text_c(cx-r, top+h+4, 2*r, b, ovl_color(o), n <= 2 ? AA_MID : AA_SMALL);
+@@
+-    aa_text_c(cx-r, top+h+19, 2*r, b, C_MUT, AA_SMALL);
++    aa_text_c(cx-r, top+h+19, 2*r, b, ovl_color(o), n <= 2 ? AA_MID : AA_SMALL);
+@@
+ static void redraw(void) {
++  if ((int32_t)(millis()-splash_until)<0) {
++    uint32_t t=millis()/12u;
++    clear(C_BG);
++    for (int i=0; i<12; i++) {
++      uint16_t c=hsv565(t+i*21u, 210, 190);
++      rect((i%4)*60, 24+(i/4)*64, 60, 64, c);
++    }
++    rect(8, 82, SCREEN_W-16, 72, C_BG);
++    frame(8, 82, SCREEN_W-16, 72, hsv565(t, 220, 255));
++    text_scale(20, 94, "SMK", C_TXT, FONT_BIG, 2);
++    text_scale(20, 126, "MIDICONTROL", hsv565(t+96u, 220, 255), FONT_SMALL, 2);
++    return;
++  }
+   if (page==PG_MAP) {
+@@
+ void setup(void) {
+@@
+   for (int i=0; i<4; i++) {
+-    fader_prev[i]=255;
++    fader_prev[i]=(uint8_t)fader(i);
+@@
+   ui_full();
++  splash_until=millis()+1400u;
+ }
+@@
+   {
+     int para_down=button_held(BTN_ENV);
+@@
+     if (!para_down&&learn_state!=LEARN_OFF) {
+       if (learn_state==LEARN_PICK) {
+         map_t *lm=&cfg.map[map_of(learn_kind, learn_slot)];
+@@
+-        ovl_note(learn_kind, learn_slot, learn_cc, knob_val[learn_slot], 0);
++        int value=learn_kind==CTL_FADER ? fader(learn_slot%N_FADER_PHYS) : knob_val[learn_slot];
++        ovl_note(learn_kind, learn_slot, learn_cc, value, 0);
+       }
+       learn_state=LEARN_OFF;
++      para_swallow_release=1;
+@@
+-    if (b==BTN_ENV&&learn_state!=LEARN_OFF) {
++    if (b==BTN_ENV&&(learn_state!=LEARN_OFF||para_swallow_release)) {
++      if (button_released(b)) para_swallow_release=0;
+       continue;
+@@
+       if (learn_state!=LEARN_OFF) {
++        if (first) continue;
+         if (learn_state==LEARN_ARMED) {
+/** End of revision patch. */
