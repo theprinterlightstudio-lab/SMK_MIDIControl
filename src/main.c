@@ -2,9 +2,10 @@
  *
  *   keys       notes out (the SMK's with velocity); the big screen names the chord they make
  *   pads       their own notes (SMK: 16 velocity pads, RGB LEDs)
- *   knobs      four assignable CCs; the other encoders navigate
+ *   knobs      eight assignable CCs per bank (A/B), rendered as rotary dial graphics on rotation
  *   faders     four CCs (SMK)
  *   buttons    CC / note / program, momentary or toggle
+ *   PARA       hold PARA (BTN_ENV) + turn any knob/fader to set its CC# on the fly; release to bind
  *   wheels     pitch bend and a CC (SMK); the pedal jack a CC
  *   GLO        the MAP page: every control, its message, number, channel and mode, edited on screen
  *   SAVE       store the mappings in flash
@@ -311,21 +312,11 @@ static uint8_t d_chord = 1, d_notes = 1, d_pills = 1, d_foot = 1, d_head = 1, d_
 static char cc_txt[16];
 static uint32_t cc_at;
 
-/* ---- the big knob and fader graphics
- *
- * A knob or fader that moves goes on this list and stays for OVL_MS. One of them on the list draws
- * one big dial, two draw two, three or four draw a grid of smaller ones; more than that is too much
- * to read, so it falls back to the CC line the firmware has always shown.
- *
- * While the overlay is up it owns the band from OVL_TOP to OVL_BOT -- the chord and the note names
- * are hidden and come back when it times out. Repainting that band costs about 60 ms to send (the
- * screen takes ~0.3 ms a row), so the repaint is rate-limited: the knob still sends MIDI at full
- * speed, only the picture is capped. OVL_FRAME_MS is the knob to turn if it feels slow on the
- * hardware. */
+/* ---- the big knob and fader graphics */
 #define OVL_MS 1500u     /* a control stays on screen this long after its last move */
 #define OVL_FRAME_MS 60u /* at most one repaint of the band this often */
-#define OVL_MAX 8        /* controls tracked; more than OVL_DIALS of them live falls back to text */
-#define OVL_DIALS 4
+#define OVL_MAX 8        /* controls tracked */
+#define OVL_DIALS 2      /* strictly 1 or 2 dials on screen */
 #define OVL_TOP 26
 #define OVL_BOT 222
 typedef struct {
@@ -338,13 +329,7 @@ static uint8_t ovl_count; /* how many dials it drew last time */
 static uint32_t ovl_drawn;
 static uint8_t d_ovl;
 
-/* ---- hold GLOBE + PATCH, turn a knob (or move a fader) to give it a CC number
- *
- * ARMED while both buttons are down and nothing has moved yet; the first knob or fader to move
- * claims the mode and the turn then steps the number instead of sending it. Letting either button go
- * writes the number into that control's mapping, which the usual 2.5 s auto-save puts in flash.
- * A knob is an encoder, so its detents step the number from wherever the control is already set; a
- * fader is absolute, so its position is the number. */
+/* ---- hold PARA (BTN_ENV) + turn a knob (or move a fader) to pick its CC# on the fly */
 enum { LEARN_OFF,
        LEARN_ARMED,
        LEARN_PICK };
@@ -539,7 +524,6 @@ static void build_note_text(void) {
     int oct = n / 12 - 1;
     char b[12] = {0};
     format_int(b, oct);
-    /* the octave: its sign (the big chord line already says the rest) */
     for (int k = 0; b[k] && i < (int)sizeof notes_txt - 2; k++) {
       notes_txt[i++] = b[k];
     }
@@ -572,7 +556,6 @@ static void draw_header(void) {
   rect(0, 30, SCREEN_W, 1, C_LINE);
 }
 
-/* the performance page: octave, the modes that are on, the chord, its notes, the last velocity as a thin rule */
 static void draw_main_status(void) {
   rect(0, 0, SCREEN_W, 26, C_BG);
   char b[12];
@@ -639,8 +622,6 @@ static void draw_main_meter(void) {
   }
 }
 
-/* ---- the big knob and fader graphics */
-
 /* a control moved: remember it, or refresh what we already have for it */
 static void ovl_note(int kind, int slot, int cc, int val, int learn) {
   uint32_t now = millis();
@@ -669,35 +650,53 @@ static void ovl_note(int kind, int slot, int cc, int val, int learn) {
   d_ovl = 1;
 }
 
-/* those still on screen, oldest entry first; the expired ones are dropped on the way past */
+/* return at most the 2 most recently active controls, oldest of the pair first */
 static int ovl_live(int idx[OVL_MAX]) {
   uint32_t now = millis();
-  int n = 0;
+  int live[OVL_MAX];
+  int count = 0;
+
   for (int i = 0; i < OVL_MAX; i++) {
-    if (!ovl[i].used) {
-      continue;
-    }
+    if (!ovl[i].used) continue;
     if (now - ovl[i].at >= OVL_MS) {
       ovl[i].used = 0;
       continue;
     }
-    idx[n++] = i;
+    live[count++] = i;
   }
-  return n;
+
+  if (count <= 2) {
+    for (int i = 0; i < count; i++) idx[i] = live[i];
+    return count;
+  }
+
+  int newest = live[0], second = live[1];
+  if (ovl[second].at > ovl[newest].at) {
+    int tmp = newest; newest = second; second = tmp;
+  }
+  for (int i = 2; i < count; i++) {
+    int cand = live[i];
+    if (ovl[cand].at > ovl[newest].at) {
+      second = newest;
+      newest = cand;
+    } else if (ovl[cand].at > ovl[second].at) {
+      second = cand;
+    }
+  }
+  idx[0] = second;
+  idx[1] = newest;
+  return 2;
 }
 
 /* where dial i of n sits, and how big */
 static void ovl_place(int n, int i, int* cx, int* cy, int* r) {
   if (n <= 1) {
     *cx = SCREEN_W / 2, *cy = 124, *r = 84;
-  } else if (n == 2) {
-    *cx = i ? 178 : 62, *cy = 124, *r = 54;
   } else {
-    *cx = (i & 1) ? 178 : 62, *cy = (i >> 1) ? 170 : 78, *r = 38;
+    *cx = i ? 178 : 62, *cy = 124, *r = 54;
   }
 }
 
-/* "K3 B" / "F2 A": which control it is, and which bank it is on */
 static void ovl_name(const ovl_t* o, char* b) {
   int phys = o->kind == CTL_KNOB ? o->slot % N_KNOB_PHYS : o->slot % N_FADER_PHYS;
   int bank = o->kind == CTL_KNOB ? o->slot / N_KNOB_PHYS : o->slot / N_FADER_PHYS;
@@ -709,7 +708,6 @@ static void ovl_name(const ovl_t* o, char* b) {
   b[i] = 0;
 }
 
-/* "CC31", or "CC31 ?" while that number is still being chosen */
 static void ovl_cc_text(const ovl_t* o, char* b) {
   char d[12];
   int i = 0;
@@ -724,32 +722,23 @@ static void ovl_cc_text(const ovl_t* o, char* b) {
 static void ovl_dial(const ovl_t* o, int n, int i) {
   int cx, cy, r;
   ovl_place(n, i, &cx, &cy, &r);
-  int thick = n <= 1 ? 7 : n == 2 ? 5
-                                  : 4;
-  int shown = o->learn ? o->cc : o->val; /* picking a number: the ring shows the number */
+  int thick = n <= 1 ? 7 : 5;
+  int shown = o->learn ? o->cc : o->val;
   int a = dial_angle(shown);
   dial_arc(cx, cy, r, thick, DIAL_A0, DIAL_SPAN, C_LINE);
   if (a > DIAL_A0) {
     dial_arc(cx, cy, r, thick, DIAL_A0, a - DIAL_A0, o->learn ? C_TXT : C_ACC);
   }
-  int plen = n <= 1 ? 18 : n == 2 ? 12
-                                  : 8;
+  int plen = n <= 1 ? 18 : 12;
   dial_pointer(cx, cy, r - thick - plen, r - thick - 2, a, C_TXT);
 
-  /* the number in the middle; the name and the CC go in the gap the sweep leaves at the bottom, out
-   * of the pointer's way (the arc's lowest point is about 0.71 r below the centre) */
   char b[16];
-  int face = n <= 1 ? AA_BIG : n == 2 ? AA_MID
-                                      : AA_SMALL;
+  int face = n <= 1 ? AA_BIG : AA_MID;
   format_int(b, shown);
   aa_text_c(cx - r, cy - aa_height(face) / 2 - (n <= 1 ? 6 : 2), 2 * r, b, C_TXT, face);
 
-  int gap = cy + (r * 181) / 256 + 3; /* just under the open end of the ring */
+  int gap = cy + (r * 181) / 256 + 3;
   ovl_name(o, b);
-  if (n >= 3) { /* one line: "K1 B" alone, there is no room for more */
-    aa_text_c(cx - r, gap, 2 * r, b, C_MUT, AA_SMALL);
-    return;
-  }
   aa_text_c(cx - r, gap, 2 * r, b, C_MUT, AA_SMALL);
   if (o->learn) {
     aa_text_c(cx - r, gap + 15, 2 * r, "ASSIGN", C_ACC, AA_SMALL);
@@ -759,15 +748,11 @@ static void ovl_dial(const ovl_t* o, int n, int i) {
   }
 }
 
-/* the bar's own height, not the dial's: the number above it and the two lines under it all have to
- * stay inside OVL_TOP..OVL_BOT, or what spills out is never cleared again */
 static void ovl_bar(const ovl_t* o, int n, int i) {
   int cx, cy, r;
   ovl_place(n, i, &cx, &cy, &r);
-  int w = n <= 1 ? 34 : n == 2 ? 28
-                               : 22;
-  int h = n <= 1 ? 118 : n == 2 ? 96
-                                : 56;
+  int w = n <= 1 ? 34 : 28;
+  int h = n <= 1 ? 118 : 96;
   int top = cy - h / 2, x = cx - w / 2;
   int shown = o->learn ? o->cc : o->val;
   int fill = shown * h / 127;
@@ -783,9 +768,6 @@ static void ovl_bar(const ovl_t* o, int n, int i) {
   aa_text_c(cx - r, top - aa_height(face) - 4, 2 * r, b, C_TXT, face);
   ovl_name(o, b);
   aa_text_c(cx - r, top + h + 4, 2 * r, b, C_MUT, AA_SMALL);
-  if (n >= 3) {
-    return;
-  }
   if (o->learn) {
     aa_text_c(cx - r, top + h + 19, 2 * r, "ASSIGN", C_ACC, AA_SMALL);
   } else {
@@ -936,7 +918,6 @@ static void draw_map(void) {
 /* ---- the EDIT page */
 static int edit_slot;
 
-/* which messages a control can send (a knob cannot hold a note: nothing would end it) */
 static const uint8_t TYPE_KNOB[] = {MSG_CC, MSG_PITCH};
 static const uint8_t TYPE_PAD[] = {MSG_NOTE, MSG_CC, MSG_PC, MSG_PITCH};
 static uint8_t type_next(int kind, int slot, uint8_t type, int dir) {
@@ -1018,8 +999,6 @@ static void draw_edit(void) {
   }
 }
 
-/* ---- dirty bookkeeping */
-
 static void ui_note_dirty(void) {
   d_chord = d_notes = d_pills = d_foot = 1;
 }
@@ -1035,9 +1014,6 @@ static void draw_perform(void) {
   }
   int idx[OVL_MAX];
   int n = ovl_live(idx);
-  if (n > OVL_DIALS) {
-    n = 0; /* too many at once to read: the CC line says what moved last */
-  }
   if (n) {
     uint32_t now = millis();
     if (d_page || d_ovl || !ovl_shown || n != ovl_count) {
@@ -1053,9 +1029,9 @@ static void draw_perform(void) {
       draw_main_meter();
     }
     d_page = d_head = 0;
-    return; /* the chord and the notes are behind the overlay until it times out */
+    return;
   }
-  if (ovl_shown) { /* it just went: give the band back */
+  if (ovl_shown) {
     ovl_shown = 0, ovl_count = 0;
     rect(0, OVL_TOP, SCREEN_W, OVL_BOT - OVL_TOP, C_BG);
     d_chord = d_notes = d_foot = 1;
@@ -1218,7 +1194,7 @@ static void cfg_save(void) {
     saved_at = millis();
     d_foot = d_edit = d_map = d_set = 1;
   } else {
-    cfg_dirty_at = millis(); /* no flash: try again later, not every pass */
+    cfg_dirty_at = millis();
   }
 }
 
@@ -1295,7 +1271,7 @@ static void midi_in(void) {
   while (midi_read(&st, &d1, &d2)) {
     uint8_t ch = (uint8_t)((st & 0x0Fu) + 1u);
     uint8_t hi = st & 0xF0u;
-    if (ch == 16) { /* the pad colours (README: the protocol) */
+    if (ch == 16) {
       if (hi == 0x90 || hi == 0x80) {
         int pad = -1;
         if (d1 >= 36 && d1 < 52) {
@@ -1335,14 +1311,13 @@ static void midi_in(void) {
   }
 }
 
-/* ---- the physical knobs, in the order the panel has them */
+/* ---- the physical knobs */
 #if BOARD_SMK37
 static const uint8_t ENC_PHYS[N_KNOB_PHYS] = {ENC_MASTER, ENC_SELECT, ENC_ALGORITHM, ENC_PRESETS,
                                               ENC_KNOB1, ENC_KNOB2, ENC_KNOB3, ENC_KNOB4};
 #else
 static const uint8_t ENC_PHYS[N_KNOB_PHYS] = {ENC_KNOB1, ENC_KNOB2, ENC_KNOB3, ENC_KNOB4};
 #endif
-/* K1..K4: the submenus' and EDIT's knobs (K5..K8 are the extra performance knobs on the SMK) */
 #if BOARD_SMK37
 static const uint8_t ENC_TOP[4] = {ENC_MASTER, ENC_SELECT, ENC_ALGORITHM, ENC_PRESETS};
 #else
@@ -1351,7 +1326,6 @@ static const uint8_t ENC_TOP[4] = {ENC_KNOB1, ENC_KNOB2, ENC_KNOB3, ENC_KNOB4};
 
 static int main_group(uint8_t p) { return p == PG_MAIN || p == PG_ARP || p == PG_CHORD || p == PG_SCALE || p == PG_SPLIT; }
 
-/* every note this firmware started, off (a page change never leaves one hanging) */
 static void stop_all(void) {
   arp_stop();
   for (int k = 0; k < key_total(); k++) {
@@ -1384,8 +1358,6 @@ static void page_set(uint8_t p) {
   if (p == page) {
     return;
   }
-  /* moving between the playing pages keeps held notes (they still play and release there); MAP/EDIT do not
-   * see the keys, so those transitions end them */
   if (!(main_group(page) && main_group(p))) {
     stop_all();
   }
@@ -1404,7 +1376,6 @@ static void page_cycle(int dir) {
   page_set(P[(i + dir + 5) % 5]);
 }
 
-/* a key plays: chord memory expands it, scale lock snaps it; the arp takes over the timing when it is on */
 static void key_press(int k) {
   map_t* km = &cfg.map[map_of(CTL_KEYS, 0)];
   int vel = key_velocity(k);
@@ -1416,7 +1387,7 @@ static void key_press(int k) {
   root = root < 0 ? 0 : root > 127 ? 127
                                    : root;
   uint8_t ch;
-  if (cfg.split_on) { /* lower zone / upper zone */
+  if (cfg.split_on) {
     ch = (uint8_t)((root < cfg.split_note ? cfg.split_lo_ch : cfg.split_hi_ch) - 1u);
   } else {
     ch = (uint8_t)(km->chan - 1u);
@@ -1467,7 +1438,6 @@ static void key_release(int k) {
   key_gen_n[k] = 0;
 }
 
-/* the ARP page's beat lamp: a quarter note at the set BPM, free-running */
 static void arp_beat_tick(uint32_t now) {
   if (page != PG_ARP) {
     arp_beat_on = 0;
@@ -1484,7 +1454,6 @@ static void arp_beat_tick(uint32_t now) {
   }
 }
 
-/* tap tempo on pad 1 (ARP page): the average of up to four intervals */
 static void arp_tap(void) {
   uint32_t t = millis();
   if (tap_last && t - tap_last > 150u && t - tap_last < 2000u) {
@@ -1513,7 +1482,7 @@ static void arp_toggle(void) {
     arp_stop();
   } else {
     cfg.arp_on = 1;
-    for (int k = 0; k < key_total(); k++) { /* the direct notes go; the arp restarts the held ones */
+    for (int k = 0; k < key_total(); k++) {
       for (int j = 0; j < key_gen_n[k]; j++) {
         send_note(key_ch[k], key_gen[k][j], 0);
       }
@@ -1526,7 +1495,6 @@ static void arp_toggle(void) {
   d_head = d_foot = d_set = 1;
 }
 
-/* CHORD: with keys held, learn their shape; with none, just switch the memory on or off */
 static int keys_held_any(void) {
   for (int k = 0; k < key_total(); k++) {
     if (key_all_held(k)) {
@@ -1563,7 +1531,7 @@ static void chord_toggle(void) {
         iv[n++] = (int8_t)d;
       }
     }
-    for (int a = 1; a < n; a++) { /* ascending */
+    for (int a = 1; a < n; a++) {
       int8_t v = iv[a], b = a;
       while (b > 0 && iv[b - 1] > v) {
         iv[b] = iv[b - 1];
@@ -1589,12 +1557,11 @@ static void scale_toggle(void) {
   d_head = d_set = 1;
 }
 
-/* the buttons that do something on this page glow dimly (the solid ones are the state) */
 static void refresh_dim(void) {
   led_button_dim(BTN_GLO, 1);
-  led_button(BTN_GLO, page == PG_MAP || learn_state != LEARN_OFF); /* solid while a CC is being assigned */
+  led_button(BTN_GLO, page == PG_MAP || learn_state != LEARN_OFF);
 #if BOARD_SMK37
-  led_button_dim(BTN_SAVE, !cfg.ble_on); /* BT: solid = BLE on */
+  led_button_dim(BTN_SAVE, !cfg.ble_on);
   led_button(BTN_SAVE, cfg.ble_on);
 #else
   led_button_dim(BTN_SAVE, 1);
@@ -1616,8 +1583,8 @@ static void refresh_dim(void) {
     led_button(BTN_EDIT, 0);
   }
   if (!main_group(page)) {
-    led_button_dim(BTN_OCT_UP, 1);   /* OK */
-    led_button_dim(BTN_OCT_DOWN, 1); /* back */
+    led_button_dim(BTN_OCT_UP, 1);
+    led_button_dim(BTN_OCT_DOWN, 1);
   } else {
     led_button_dim(BTN_OCT_UP, 0);
     led_button_dim(BTN_OCT_DOWN, 0);
@@ -1632,7 +1599,6 @@ static void refresh_dim(void) {
 #endif
 }
 
-/* ---- the panel */
 void setup(void) {
   cfg_load();
   rows_build();
@@ -1668,41 +1634,37 @@ void loop(void) {
       bt_ready = 1;
       d_head = 1;
     }
-  } else if (bt_ready && bt_enable(0) == 0) { /* BT off: stop advertising */
+  } else if (bt_ready && bt_enable(0) == 0) {
     bt_ready = 0;
     d_head = 1;
   }
 #endif
 #if BOARD_SMK37
-  if (button_pressed(BTN_SAVE)) { /* BT: the BLE MIDI radio */
+  if (button_pressed(BTN_SAVE)) {
     cfg.ble_on = !cfg.ble_on;
     cfg_changed();
     d_head = 1;
   }
 #endif
 
-  /* PATCH is home, GLOBE the map; < > turn the main pages; ARP/SCALE/CHORD open their submenu
-   * (pressing them again, inside it, switches the mode) */
-  /* GLOBE + PATCH: hold both, turn a knob or move a fader to pick its CC number, let go to keep it.
-   * Whichever of the two went down first has already done its own job, so the page it was on is
-   * latched as each goes down alone and handed back when the hold ends. */
+  /* ---- hold PARA (BTN_ENV): turn any knob or fader to pick its CC# on the fly */
   {
-    int both = button_held(BTN_GLO) && button_held(BTN_HOME);
-    if ((button_pressed(BTN_GLO) && !button_held(BTN_HOME)) || (button_pressed(BTN_HOME) && !button_held(BTN_GLO))) {
+    int para_down = button_held(BTN_ENV);
+
+    if (para_down && learn_state == LEARN_OFF) {
       learn_back = page;
-    }
-    if (both && learn_state == LEARN_OFF) {
       learn_state = LEARN_ARMED;
-      page_set(PG_MAIN); /* the dials live on the performance page */
+      page_set(PG_MAIN);
       refresh_dim();
     }
-    if (!both && learn_state != LEARN_OFF) {
+    
+    if (!para_down && learn_state != LEARN_OFF) {
       if (learn_state == LEARN_PICK) {
         map_t* lm = &cfg.map[map_of(learn_kind, learn_slot)];
-        lm->type = MSG_CC; /* the gesture gives a CC number, so that is what it sends */
+        lm->type = MSG_CC;
         lm->num = (uint8_t)learn_cc;
         cfg_changed();
-        ovl_note(learn_kind, learn_slot, learn_cc, learn_cc, 0); /* the same dial, now as it is set */
+        ovl_note(learn_kind, learn_slot, learn_cc, knob_val[learn_slot], 0);
       }
       learn_state = LEARN_OFF;
       if (learn_back != 0xFFu) {
@@ -1756,7 +1718,6 @@ void loop(void) {
 #endif
   }
 
-  /* the banks (SMK-37's labelled buttons) */
 #if BOARD_SMK37
   if (button_pressed(BTN_KNOB_BANK)) {
     cfg.knob_bank ^= 1;
@@ -1766,14 +1727,13 @@ void loop(void) {
   if (button_pressed(BTN_FADER_BANK)) {
     cfg.fader_bank ^= 1;
     for (int i = 0; i < N_FADER_PHYS; i++) {
-      fader_prev[i] = (uint8_t)fader(i); /* no jump on the new bank */
+      fader_prev[i] = (uint8_t)fader(i);
     }
     cfg_changed();
     d_head = 1;
   }
 #endif
 
-  /* transposition (OCT- / OCT+) */
   int oct = button_pressed(BTN_OCT_UP) - button_pressed(BTN_OCT_DOWN);
   if (oct && page == PG_MAIN) {
     int t = cfg.transpose + oct * 12;
@@ -1790,7 +1750,6 @@ void loop(void) {
     led_button(BTN_OCT_UP, 0);
   }
 
-  /* in a menu OCT+ is OK and OCT- is back (both glow dimly) */
   if (!main_group(page)) {
     if (button_pressed(BTN_OCT_UP)) {
       if (page == PG_MAP) {
@@ -1826,7 +1785,7 @@ void loop(void) {
     int d = accel(encoder(ENC_SELECT), &last_enc[ENC_SELECT]);
     int jump = accel(encoder(ENC_PRESETS), &last_enc[ENC_PRESETS]);
 #if BOARD_SMK37
-    d += accel(encoder(ENC_MASTER), &last_enc[ENC_MASTER]); /* K1 too: the menu knob */
+    d += accel(encoder(ENC_MASTER), &last_enc[ENC_MASTER]);
 #endif
     if (d) {
       map_sel = (map_sel + d) % n_rows;
@@ -2046,7 +2005,7 @@ void loop(void) {
       }
       int slot = cfg.knob_bank * N_KNOB_PHYS + i;
       map_t* m = &cfg.map[map_of(CTL_KNOB, slot)];
-      if (learn_state != LEARN_OFF) { /* assigning: the turn picks a number and nothing goes out */
+      if (learn_state != LEARN_OFF) {
         if (learn_state == LEARN_ARMED) {
           learn_state = LEARN_PICK, learn_kind = CTL_KNOB, learn_slot = (uint8_t)slot, learn_cc = m->num;
         }
@@ -2076,11 +2035,11 @@ void loop(void) {
     for (int i = 0; i < fader_count(); i++) {
       int v = fader(i);
       if (v != fader_prev[i]) {
-        int first = fader_prev[i] == 255u; /* the first read after power-on is not a move */
+        int first = fader_prev[i] == 255u;
         fader_prev[i] = (uint8_t)v;
         int slot = cfg.fader_bank * N_FADER_PHYS + i;
         map_t* fm = &cfg.map[map_of(CTL_FADER, slot)];
-        if (learn_state != LEARN_OFF) { /* assigning: the fader's position is the number */
+        if (learn_state != LEARN_OFF) {
           if (learn_state == LEARN_ARMED) {
             learn_state = LEARN_PICK, learn_kind = CTL_FADER, learn_slot = (uint8_t)slot;
           }
@@ -2098,6 +2057,9 @@ void loop(void) {
     }
     for (int i = 0; i < N_BTN_UI; i++) {
       int b = BTN_ID[i];
+      if (b == BTN_ENV && learn_state != LEARN_OFF) {
+        continue;
+      }
       map_t* m = &cfg.map[map_of(CTL_BUTTON, i)];
       if (button_pressed(b)) {
         int on = 1, val = 127;
@@ -2161,7 +2123,6 @@ void loop(void) {
   arp_tick(millis());
   arp_beat_tick(millis());
 
-  /* SAVE stores from any page; HOME + REC is the panic */
 #if !BOARD_SMK37
   if (button_pressed(BTN_SAVE)) {
     cfg_save();
@@ -2205,6 +2166,6 @@ void loop(void) {
   redraw();
 }
 
-void audio(int32_t* out, uint32_t frames) { /* a controller: silence */
+void audio(int32_t* out, uint32_t frames) {
   (void)out, (void)frames;
 }
