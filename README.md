@@ -1,4 +1,4 @@
-# DUMBMIDI
+# SMK_MIDICOntrol
 
 ![DUMBMIDI on the SMK-37](docs/screen.png)
 
